@@ -2,6 +2,7 @@ import tempfile
 import zipfile
 import os
 import xml.etree.ElementTree as ET
+from xml.etree.ElementTree import Element
 
 docx_path = "hello_world.docx"
 PARAGRAPH_CRITERIA= {
@@ -247,6 +248,39 @@ def _count_list_items(element, all_elements, current_index):
 
     return count    
 
+def _ensure_single_empty_paragraph_after(body: ET.Element, all_elements: list[ET.Element], current_index: int, text_content: str):
+      """
+      Ensure exactly one empty paragraph exists after the current element.
+      Either adds one if missing or removes excess if more than one exists.
+      
+      Args:
+          body: The document body element
+          all_elements: List of all elements in body
+          current_index: Index of current element
+          text_content: Text content of current element (for logging)
+      
+      Returns:
+          str: Action taken ('added', 'cleaned', or 'none')
+      """
+      # Check what comes next
+      if current_index + 1 < len(all_elements):
+          next_text = _get_text_content(all_elements[current_index + 1])
+
+          if next_text.strip() == '':
+              # There's already at least one empty paragraph
+              # Clean up any excess (keep only 1)
+              removed = _cleanup_excess_empty_paragraphs(body, all_elements, current_index)
+              print(f"Found empty after: {text_content[:50]}... (removed {removed} excess)")
+              return 'cleaned'
+          else:
+              # No empty paragraph exists, add one
+              new_empty = _create_empty_paragraph()
+              body.insert(current_index + 1, new_empty)
+              all_elements.insert(current_index + 1, new_empty)  # Keep list in sync
+              print(f"Added empty after: {text_content[:50]}...")
+              return 'added'
+      return 'none'    
+
 with tempfile.TemporaryDirectory() as temp_dir:
     # Extract docx contents
     _extract_docx(docx_path, temp_dir)
@@ -279,46 +313,18 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
 
         if (is_paragraph) and not _is_list_item(element):
-            # Check what comes next
-            if i+1 < len(all_elements):
-                next_text = _get_text_content(all_elements[i+1])
-
-                if next_text.strip() == '':
-                    # There's already at least one empty paragraph
-                    # Clean up any excess (keep only 1)
-                    removed = _cleanup_excess_empty_paragraphs(body, all_elements, i)
-                    print(f"Found empty after: {text_content[:50]}... (removed {removed} excess)")
-                else:
-                    # No empty paragraph exists, add one
-                    new_empty = _create_empty_paragraph()
-                    body.insert(i+1, new_empty)
-                    all_elements.insert(i+1, new_empty)  # Keep list in sync
-                    print(f"Added empty after: {text_content[:50]}...")
+            _ensure_single_empty_paragraph_after(body, all_elements, i, text_content)           
         elif (is_last_of_list and not text_content.isupper()):
             list_item_count = _count_list_items(element, all_elements, i)
             
             # Only add spacing for lists with more than 3 items
             if list_item_count > 3: 
-                # Check what comes next
-                if i+1 < len(all_elements):
-                    next_text = _get_text_content(all_elements[i+1])
-
-                    if next_text.strip() == '':
-                        # There's already at least one empty paragraph
-                        # Clean up any excess (keep only 1)
-                        removed = _cleanup_excess_empty_paragraphs(body, all_elements, i)
-                        print(f"Found empty after: {text_content[:50]}... (removed {removed} excess)")
-                    else:
-                        # No empty paragraph exists, add one
-                        new_empty = _create_empty_paragraph()
-                        body.insert(i+1, new_empty)
-                        all_elements.insert(i+1, new_empty)  # Keep list in sync
-                        print(f"Added empty after: {text_content[:50]}...")            
+                _ensure_single_empty_paragraph_after(body, all_elements, i, text_content)
         i += 1
 
     # Save the modified document
     tree.write(doc_xml_path, encoding='utf-8', xml_declaration=True)
-    _create_docx(temp_dir, 'output5.docx')
+    _create_docx(temp_dir, 'output6.docx')
     
 
 
