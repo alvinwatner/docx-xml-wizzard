@@ -186,68 +186,6 @@ def _cleanup_excess_empty_paragraphs(body, all_elements, current_index):
 
     return len(elements_to_remove)  # Return number of removed elements    
 
-
-def _count_list_items(element, all_elements, current_index):
-    """
-    Count total number of items in the current list (including all levels).
-    
-    Args:
-        element: Current element that should be a list item
-        all_elements: List of all elements in body
-        current_index: Index of current element
-        
-    Returns:
-        int: Total count of items in this list
-    """
-    # Get current list properties
-    current_numPr = element.find('.//w:numPr', namespaces)
-    if current_numPr is None:
-        return 0
-
-    # Get current list ID
-    current_numId = current_numPr.find('.//w:numId', namespaces)
-    if current_numId is None:
-        return 0
-
-    current_list_id = current_numId.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')
-
-    # Count items with same list ID
-    count = 0
-
-    # Search backward from current position
-    for i in range(current_index, -1, -1):
-        elem = all_elements[i]
-        elem_numPr = elem.find('.//w:numPr', namespaces)
-        if elem_numPr:
-            elem_numId = elem_numPr.find('.//w:numId', namespaces)
-            if elem_numId:
-                elem_list_id = elem_numId.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')
-                if elem_list_id == current_list_id:
-                    count += 1
-                else:
-                    break  # Different list, stop counting
-        else:
-            # Not a list item, check if we've started counting
-            if count > 0:
-                break  # We've left the list
-
-    # Search forward from current position + 1
-    for i in range(current_index + 1, len(all_elements)):
-        elem = all_elements[i]
-        elem_numPr = elem.find('.//w:numPr', namespaces)
-        if elem_numPr:
-            elem_numId = elem_numPr.find('.//w:numId', namespaces)
-            if elem_numId:
-                elem_list_id = elem_numId.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')
-                if elem_list_id == current_list_id:
-                    count += 1
-                else:
-                    break  # Different list, stop counting
-        else:
-            break  # Not a list item, we've left the list
-
-    return count    
-
 def _ensure_single_empty_paragraph_after(body: ET.Element, all_elements: list[ET.Element], current_index: int, text_content: str):
       """
       Ensure exactly one empty paragraph exists after the current element.
@@ -299,32 +237,38 @@ with tempfile.TemporaryDirectory() as temp_dir:
     all_elements = list(body)
 
     i = 0
+    current_list_count = 0
     while i < len(all_elements):  # Use while loop since list length may change
         element = all_elements[i]
         text_content = _get_text_content(element)
         sentence_count = _count_sentences(text_content)
 
         next_element = all_elements[i+1] if i+1 < len(all_elements) else None
+                
+        # Track list items as we encounter them
+        if (_is_list_item(element)):
+            current_list_count += 1
 
-        # Check if it's a paragraph OR last list item
+        # Apply formatting rules
         is_paragraph = (sentence_count >= PARAGRAPH_CRITERIA['min_sentences'] or
                         len(text_content.split()) >= PARAGRAPH_CRITERIA['min_words'])
         is_last_of_list = _is_last_list_item(element, next_element)
 
-
         if (is_paragraph) and not _is_list_item(element):
             _ensure_single_empty_paragraph_after(body, all_elements, i, text_content)           
         elif (is_last_of_list and not text_content.isupper()):
-            list_item_count = _count_list_items(element, all_elements, i)
-            
-            # Only add spacing for lists with more than 3 items
-            if list_item_count > 3: 
+            # Only add spacing after lists with more than 3 items
+            if current_list_count > 3: 
                 _ensure_single_empty_paragraph_after(body, all_elements, i, text_content)
+        
+        if _is_last_list_item(element, next_element): 
+            current_list_count = 0
+
         i += 1
 
     # Save the modified document
     tree.write(doc_xml_path, encoding='utf-8', xml_declaration=True)
-    _create_docx(temp_dir, 'output6.docx')
+    _create_docx(temp_dir, 'output7.docx')
     
 
 
