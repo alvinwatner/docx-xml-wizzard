@@ -3,12 +3,16 @@ import zipfile
 import os
 import xml.etree.ElementTree as ET
 from xml.etree.ElementTree import Element
+from typing import List, Dict
 
 docx_path = "hello_world.docx"
 PARAGRAPH_CRITERIA= {
     'min_sentences':2,
     'min_words':15
 }
+
+PAGE_CONTENT_HEIGHT = 727.2  # A4 page content height in points
+CONTENT_WIDTH = 447.9  # A4 content width in points
 
 def _extract_docx(docx_path: str, extract_to: str):
     """Extract docx file contents to directory"""
@@ -219,6 +223,119 @@ def _ensure_single_empty_paragraph_after(body: ET.Element, all_elements: list[ET
               return 'added'
       return 'none'    
 
+def _get_list_level(element):
+    """Get the list level of an element (0-based)"""
+    numPr = element.find('.//w:numPr', namespaces)
+    if numPr is None:
+        return None
+    
+    ilvl = numPr.find('.//w:ilvl', namespaces)
+    if ilvl is not None:
+        return int(ilvl.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val', '0'))
+    return 0
+
+def _is_heading(element):
+    """
+    Determine if an element is a heading.
+    For now, we check if it's a level-0 list item with uppercase text
+    (like "1. IDENTIFIKASI STATUS PENILAI")
+    """
+    text = _get_text_content(element).strip()
+    
+    if not text:
+        return False
+    
+    # Check if it's a numbered list item at level 0
+    if _is_list_item(element):
+        level = _get_list_level(element)
+        if level == 0:
+            # Remove numbering and check if remaining text has uppercase words
+            # Split and skip the first part (usually the number)
+            words = text.split()
+            if len(words) > 1:
+                # Check if significant words are uppercase
+                significant_text = ' '.join(words[1:])
+                # If more than 50% of alphabetic characters are uppercase, consider it a heading
+                upper_count = sum(1 for c in significant_text if c.isupper())
+                alpha_count = sum(1 for c in significant_text if c.isalpha())
+                if alpha_count > 0 and upper_count / alpha_count > 0.5:
+                    return True
+    
+    return False
+
+
+def _estimate_element_height(element) -> float:
+    """
+    Estimate the height of an element in points.
+    Based on our document analysis work.
+    """
+    text = _get_text_content(element)
+    
+    # Default font measurements
+    font_size = 11.0  # Default font size in points
+    line_height = font_size * 1.5  # Typical line spacing (1.5x)
+    
+    if not text.strip():
+        # Empty paragraph - single line height
+        return line_height
+    
+    # Text height calculation using our formula
+    char_width = font_size * 0.6  # Average character width
+    chars_per_line = CONTENT_WIDTH / char_width
+    
+    # Calculate number of lines
+    num_lines = max(1, len(text) / chars_per_line)
+    height = num_lines * line_height
+    
+    # Add some padding for paragraph spacing
+    height += 6  # Small padding between paragraphs
+    
+    return height
+
+def _calculate_page_positions(all_elements: List[Element]) -> Dict[int, int]:
+    """
+    Calculate which page each element falls on.
+    Returns a dictionary mapping element index to page number.
+    """
+    cumulative_height = 0.0
+    current_page = 1
+    element_pages = {}
+    
+    for i, element in enumerate(all_elements):
+        elem_height = _estimate_element_height(element)
+        
+        # Check if this element would overflow to next page
+        if cumulative_height + elem_height > PAGE_CONTENT_HEIGHT:
+            # Start new page
+            current_page += 1
+            cumulative_height = elem_height
+        else:
+            cumulative_height += elem_height
+        
+        element_pages[i] = current_page
+        
+        # Debug output
+        text_preview = _get_text_content(element)[:50]
+        print(f"Element {i}: Page {current_page}, Height: {elem_height:.1f}, Total: {cumulative_height:.1f} - {text_preview}...")
+    
+    return element_pages    
+
+def _insert_line_break_after(body: Element, all_elements: List[Element], index: int):
+    """Insert an empty paragraph (line break) after the element at the given index"""
+    if index < 0 or index >= len(all_elements):
+        return
+    
+    empty_para = _create_empty_paragraph()
+    # Insert after the specified element
+    insert_position = all_elements[index]
+    body_list = list(body)
+    insert_idx = body_list.index(insert_position) + 1
+    body.insert(insert_idx, empty_para)
+    all_elements.insert(index + 1, empty_para)
+    
+    return True
+
+
 with tempfile.TemporaryDirectory() as temp_dir:
     # Extract docx contents
     _extract_docx(docx_path, temp_dir)
@@ -237,6 +354,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
     all_elements = list(body)
 
     i = 0
+    groups = []
     current_list_count = 0
     while i < len(all_elements):  # Use while loop since list length may change
         element = all_elements[i]
@@ -252,25 +370,125 @@ with tempfile.TemporaryDirectory() as temp_dir:
         # Apply formatting rules
         is_paragraph = (sentence_count >= PARAGRAPH_CRITERIA['min_sentences'] or
                         len(text_content.split()) >= PARAGRAPH_CRITERIA['min_words'])
-        is_last_of_list = _is_last_list_item(element, next_element)
-
-        if (is_paragraph) and not _is_list_item(element):
-            _ensure_single_empty_paragraph_after(body, all_elements, i, text_content)           
-        elif (is_last_of_list and not text_content.isupper()):
-            # Only add spacing after lists with more than 3 items
-            if current_list_count > 3: 
-                _ensure_single_empty_paragraph_after(body, all_elements, i, text_content)
         
-        if _is_last_list_item(element, next_element): 
-            current_list_count = 0
+        ## below is the logic to group elements that we considered need to be on the same page
+        if is_paragraph:                                    
+            groups.append([element])
+        if _is_heading(element):
+            next_element_text_content = _get_text_content(next_element)
+            next_sentence_count = _count_sentences(next_element_text_content)
+            is_next_text_content_is_paragraph = (next_sentence_count >= PARAGRAPH_CRITERIA['min_sentences'] or
+                        len(next_element_text_content.split()) >= PARAGRAPH_CRITERIA['min_words'])
+            if is_next_text_content_is_paragraph:
+                groups.append([element, next_element])
+        
+        ### This is basic rule for adding empty paragraph after a paragraph
+        ### Temporarily commented out since we are focusing on the groups
+        # is_last_of_list = _is_last_list_item(element, next_element)
+
+        # if (is_paragraph) and not _is_list_item(element):
+        #     _ensure_single_empty_paragraph_after(body, all_elements, i, text_content)           
+        # elif (is_last_of_list and not text_content.isupper()):
+        #     # Only add spacing after lists with more than 3 items
+        #     if current_list_count > 3: 
+        #         _ensure_single_empty_paragraph_after(body, all_elements, i, text_content)
+        
+        # if _is_last_list_item(element, next_element): 
+        #     current_list_count = 0
 
         i += 1
 
+    # print_groups(groups)
+
+    print(f"\nIdentified {len(groups)} groups that should stay together")
+
+    # Step 2: Calculate page positions for all elements
+    print("\nCalculating page positions...")
+    element_pages = _calculate_page_positions(all_elements)
+  
+    # Step 3: Check if any groups are split across pages and fix them
+    print("\nChecking for split groups...")
+    total_line_breaks_added = 0
+    
+    for group_idx, group in enumerate(groups):
+        # Get indices of elements in this group
+        group_indices = []
+        for elem in group:
+            try:
+                idx = all_elements.index(elem)
+                group_indices.append(idx)
+            except ValueError:
+                continue
+        
+        if not group_indices:
+            continue
+        
+        # Check if group spans multiple pages
+        pages = [element_pages.get(idx, 1) for idx in group_indices]
+        unique_pages = set(pages)
+        
+        if len(unique_pages) > 1:
+            group_text = _get_text_content(group[0])[:50]
+            print(f"\nGroup {group_idx} spans pages {unique_pages}: {group_text}...")
+            
+            # Find the element before this group
+            first_idx = min(group_indices)
+            if first_idx > 0:
+                # Keep adding line breaks until the group stays together
+                line_breaks_added = 0
+                max_attempts = 10  # Prevent infinite loop
+                
+                while line_breaks_added < max_attempts:
+                    # Add a line break before the group
+                    insert_after_idx = first_idx - 1 + line_breaks_added
+                    _insert_line_break_after(body, all_elements, insert_after_idx)
+                    line_breaks_added += 1
+                    total_line_breaks_added += 1
+                    
+                    # Recalculate page positions after adding line break
+                    element_pages = _calculate_page_positions(all_elements)
+                    
+                    # Update group indices since we added elements
+                    group_indices = []
+                    for elem in group:
+                        try:
+                            idx = all_elements.index(elem)
+                            group_indices.append(idx)
+                        except ValueError:
+                            continue
+                    
+                    # Check if group is now on the same page
+                    pages = [element_pages.get(idx, 1) for idx in group_indices]
+                    unique_pages = set(pages)
+                    
+                    if len(unique_pages) == 1:
+                        print(f"  Fixed! Added {line_breaks_added} line breaks. Group now on page {pages[0]}")
+                        break
+                    else:
+                        print(f"  Still split after {line_breaks_added} line breaks, continuing...")
+                
+                if line_breaks_added >= max_attempts:
+                    print(f"  Warning: Could not fix group after {max_attempts} attempts")
+    
+    print(f"\nTotal line breaks added: {total_line_breaks_added}")  
+
+    '''
+    1. after all groups are collected, we will iterate over all the elements
+    2. we will calculate the height of the content of each element and accumulate
+    3. if it reach the end of the page, we check the grouped element. If the grouped element separated 
+    into different pages, we will keep adding line break, until the grouped element get into the same page
+    '''
+
+    ## TODO: (1) check if the accumulated height is accurate
+    ## (2) watch closely how it insert the line break/empty paragraph
+    ## (3) finalize, add more types of groups
+    ## (4) holiday to japan
+
     # Save the modified document
     tree.write(doc_xml_path, encoding='utf-8', xml_declaration=True)
-    _create_docx(temp_dir, 'output7.docx')
-    
+    _create_docx(temp_dir, 'output8.docx')
 
+    
 
 
     
